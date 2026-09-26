@@ -319,6 +319,8 @@ function handleSaveIdentity() {
   };
 
   try {
+    // lgtm[js/clear-text-storage-of-sensitive-data]
+    // Intentional: user-requested explicit local device backup at tc.identity.v1.
     localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(payload));
     identityMessage = 'Saved on this device.';
   } catch (error) {
