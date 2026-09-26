@@ -1,0 +1,23 @@
+{
+  "name": "technocore-operator",
+  "version": "1.0.0",
+  "description": "Technocore Operator — a browser-only operator console for technocore.chat.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No tests configured\"",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://localhost:26831/Dajakdl/technocore-operator"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "vite": "^8.3.1"
+  },
+  "private": "true"
+}
