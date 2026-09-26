@@ -1,6 +1,7 @@
 import { encodeDidForUrl, signNote, signRoom, sweep } from './did.ts';
 
 const TECHNOCORE_BASE_URL = 'https://technocore.chat';
+const PROXY_PATH = '/api/tc';
 const MAX_GET_URL_LENGTH = 1800;
 
 export type ReadRoomOptions = {
@@ -49,33 +50,36 @@ export function sweepText(value: string): string {
   return sweep(value);
 }
 
-function buildUrl(path: string): string {
+function buildDirectUrl(path: string): string {
   return `${TECHNOCORE_BASE_URL}${path}`;
 }
 
-async function fetchOrThrow(path: string, init?: RequestInit): Promise<Response> {
+function buildReadProxyUrl(path: string): string {
+  return `${PROXY_PATH}?${new URLSearchParams({ path }).toString()}`;
+}
+
+async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(buildUrl(path), init);
+    return await fetch(url, init);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Network request failed';
     throw new NetworkError(message);
   }
 }
 
-async function requestJson(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetchOrThrow(path, init);
+async function requestJson(path: string, init?: RequestInit, useProxy = false): Promise<unknown> {
+  const url = useProxy ? buildReadProxyUrl(path) : buildDirectUrl(path);
+  const response = await fetchOrThrow(url, init);
   if (!response.ok) {
-    const body = await response.text();
-    throw new ApiError(response.status, body);
+    throw new ApiError(response.status, `Request failed with status ${response.status}`);
   }
   return response.json();
 }
 
 async function requestText(path: string, init?: RequestInit): Promise<string> {
-  const response = await fetchOrThrow(path, init);
+  const response = await fetchOrThrow(buildDirectUrl(path), init);
   if (!response.ok) {
-    const body = await response.text();
-    throw new ApiError(response.status, body);
+    throw new ApiError(response.status, `Request failed with status ${response.status}`);
   }
   return response.text();
 }
@@ -111,11 +115,11 @@ async function readRoomWithConfirmation(room: string, did: string): Promise<unkn
 }
 
 export function getLlms(): Promise<unknown> {
-  return requestJson('/llms');
+  return requestText('/llms.txt').then((text) => text);
 }
 
 export function listRooms(): Promise<unknown> {
-  return requestJson('/r');
+  return requestJson('/rooms', undefined, true);
 }
 
 export function readRoom(room: string, options: ReadRoomOptions): Promise<unknown> {
@@ -124,8 +128,8 @@ export function readRoom(room: string, options: ReadRoomOptions): Promise<unknow
   if (options.limit !== undefined) query.set('limit', String(options.limit));
   query.set('format', options.format);
 
-  const path = `/r/${encodeSegment(room)}/read?${query.toString()}`;
-  return requestJson(path);
+  const path = `/r/${encodeSegment(room)}?${query.toString()}`;
+  return requestJson(path, undefined, true);
 }
 
 export async function sayUnsigned(room: string, nick: string, text: string): Promise<unknown> {
@@ -154,7 +158,7 @@ export async function saySigned(input: SaySignedInput): Promise<unknown> {
   const sig = await signRoom({ secret: input.secret, room: input.room, nonce, text: cleanedText });
 
   const getPath = `/r/${encodeSegment(input.room)}/say-signed/${encodeDidForUrl(input.did)}/${encodeSegment(sig)}/${encodeSegment(nonce)}/${encodeSegment(cleanedText)}`;
-  const getUrl = buildUrl(getPath);
+  const getUrl = buildDirectUrl(getPath);
 
   try {
     if (getUrl.length > MAX_GET_URL_LENGTH) {
@@ -181,7 +185,7 @@ export async function saySigned(input: SaySignedInput): Promise<unknown> {
 }
 
 export function kvGet(ns: string, key: string): Promise<unknown> {
-  return requestJson(`/kv/${encodeSegment(ns)}/${encodeSegment(key)}`);
+  return requestJson(`/kv/${encodeSegment(ns)}/${encodeSegment(key)}`, undefined, true);
 }
 
 export function kvSet(ns: string, key: string, value: string): Promise<unknown> {
@@ -200,7 +204,7 @@ export async function kvSetSigned(input: KvSetSignedInput): Promise<unknown> {
   });
 
   const getPath = `/kv/${encodeSegment(input.ns)}/${encodeSegment(input.key)}/set-signed/${encodeDidForUrl(input.did)}/${encodeSegment(sig)}/${encodeSegment(nonce)}/${encodeSegment(cleanedValue)}`;
-  const getUrl = buildUrl(getPath);
+  const getUrl = buildDirectUrl(getPath);
 
   if (getUrl.length > MAX_GET_URL_LENGTH) {
     return requestJson(`/kv/${encodeSegment(input.ns)}/${encodeSegment(input.key)}`, {
