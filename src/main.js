@@ -1,5 +1,11 @@
 import './styles.css';
 import { getErrorText, readRoom, sayUnsigned } from './lib/technocore.ts';
+import {
+  encodeDidForUrl,
+  fingerprint,
+  generateIdentity,
+  notePath,
+} from './lib/did.ts';
 
 const tabs = [
   { id: 'identity', label: 'Identity' },
@@ -7,9 +13,14 @@ const tabs = [
   { id: 'registry', label: 'Registry' },
 ];
 
+const IDENTITY_STORAGE_KEY = 'tc.identity.v1';
+
 let activeTab = 'identity';
 let importText = '';
-let importMessage = '';
+let identityMessage = '';
+let identity = null;
+let identityFingerprint = '';
+let identityNotePath = '';
 
 let roomName = 'lobby';
 let roomNick = '';
@@ -25,7 +36,7 @@ function render() {
     <main class="shell" aria-labelledby="app-title">
       <header class="shell__header">
         <h1 id="app-title">Technocore Operator</h1>
-        <div class="status-pill" aria-live="polite" title="Will show shortened DID when wired">unsigned</div>
+        <div class="status-pill" aria-live="polite" title="${escapeHtml(statusTitle())}">${escapeHtml(statusLabel())}</div>
       </header>
 
       <nav class="tabs" role="tablist" aria-label="Technocore Operator panels">
@@ -51,25 +62,26 @@ function render() {
 
       <section id="panel-identity" class="panel" role="tabpanel" aria-labelledby="tab-identity" ${activeTab !== 'identity' ? 'hidden' : ''}>
         <h2>Identity</h2>
-        <p class="muted">no key yet</p>
+        <p class="muted">${identity ? 'key loaded' : 'no key yet'}</p>
 
         <div class="field-grid">
-          <label class="field"><span>DID</span><output aria-label="DID"></output></label>
-          <label class="field"><span>Fingerprint</span><output aria-label="Fingerprint"></output></label>
-          <label class="field"><span>DID-note path</span><output aria-label="DID-note path"></output></label>
+          <label class="field"><span>DID</span><output aria-label="DID">${escapeHtml(identity?.did ?? '')}</output></label>
+          <label class="field"><span>Fingerprint</span><output aria-label="Fingerprint">${escapeHtml(identityFingerprint)}</output></label>
+          <label class="field"><span>DID-note path</span><output aria-label="DID-note path">${escapeHtml(identityNotePath)}</output></label>
         </div>
 
         <div class="action-row">
-          <button type="button" disabled title="Crypto not implemented">Generate key</button>
+          <button type="button" id="generate-btn">Generate key</button>
           <button type="button" id="import-btn">Import key</button>
-          <button type="button" disabled title="Crypto not implemented">Export backup</button>
+          <button type="button" id="export-btn" ${identity ? '' : 'disabled'}>Export backup</button>
+          <button type="button" id="save-btn" ${identity ? '' : 'disabled'}>Save on this device</button>
           <button type="button" id="clear-btn">Clear from this device</button>
         </div>
 
-        <label class="stacked" for="import-area">Import payload (placeholder only)</label>
-        <textarea id="import-area" rows="6" placeholder="Paste key backup text for UI testing only">${escapeHtml(importText)}</textarea>
-        <p class="hint">Import accepts text for UI flow only. No cryptographic parsing or storage is performed.</p>
-        <p class="hint" aria-live="polite">${escapeHtml(importMessage)}</p>
+        <label class="stacked" for="import-area">Import backup JSON</label>
+        <textarea id="import-area" rows="6" placeholder='{"v":1,"did":"did:key:...","secretB64url":"...","createdAt":"..."}'>${escapeHtml(importText)}</textarea>
+        <p class="hint">Import expects JSON with v, did, secretB64url, and createdAt. This app never logs secrets.</p>
+        <p class="hint" aria-live="polite">${escapeHtml(identityMessage)}</p>
       </section>
 
       <section id="panel-rooms" class="panel" role="tabpanel" aria-labelledby="tab-rooms" ${activeTab !== 'rooms' ? 'hidden' : ''}>
@@ -157,6 +169,18 @@ function canSendUnsigned() {
   return !roomLoading && roomNick.trim().length > 0 && roomText.trim().length > 0;
 }
 
+function statusLabel() {
+  if (!identity?.did) return 'unsigned';
+  const did = identity.did;
+  if (did.length <= 22) return did;
+  return `${did.slice(0, 14)}…${did.slice(-6)}`;
+}
+
+function statusTitle() {
+  if (!identity?.did) return 'Will show shortened DID when wired';
+  return `DID: ${identity.did} | URL: ${encodeDidForUrl(identity.did)}`;
+}
+
 function bindEvents() {
   const tabButtons = Array.from(document.querySelectorAll('[role="tab"]'));
   tabButtons.forEach((button) => {
@@ -189,19 +213,24 @@ function bindEvents() {
     importText = event.target.value;
   });
 
+  document.querySelector('#generate-btn')?.addEventListener('click', () => {
+    void handleGenerateIdentity();
+  });
+
   document.querySelector('#import-btn')?.addEventListener('click', () => {
-    importMessage = importText.trim()
-      ? 'Placeholder import captured for UI flow only. Nothing was parsed or persisted.'
-      : 'Enter text to exercise the placeholder import flow.';
-    render();
-    document.querySelector('#import-area')?.focus();
+    void handleImportIdentity();
+  });
+
+  document.querySelector('#export-btn')?.addEventListener('click', () => {
+    handleExportIdentity();
+  });
+
+  document.querySelector('#save-btn')?.addEventListener('click', () => {
+    handleSaveIdentity();
   });
 
   document.querySelector('#clear-btn')?.addEventListener('click', () => {
-    importText = '';
-    importMessage = 'Placeholder data cleared from this screen.';
-    render();
-    document.querySelector('#import-area')?.focus();
+    handleClearIdentity();
   });
 
   const roomNameInput = document.querySelector('#room-name');
@@ -230,6 +259,166 @@ function bindEvents() {
   document.querySelector('#send-unsigned')?.addEventListener('click', () => {
     void sendUnsignedMessage();
   });
+}
+
+async function handleGenerateIdentity() {
+  try {
+    const generated = await generateIdentity();
+    identity = {
+      did: generated.did,
+      secretB64url: generated.secretB64url,
+      createdAt: new Date().toISOString(),
+    };
+    importText = '';
+    await hydrateIdentityFields();
+    identityMessage = 'Key generated in memory. Export backup now; this is your only backup.';
+  } catch (error) {
+    identityMessage = getErrorText(error);
+  }
+  render();
+}
+
+async function handleImportIdentity() {
+  try {
+    const parsed = parseIdentityJson(importText);
+    identity = parsed;
+    await hydrateIdentityFields();
+    identityMessage = 'Identity imported into memory.';
+  } catch (error) {
+    identityMessage = getErrorText(error);
+  }
+  render();
+}
+
+function handleExportIdentity() {
+  if (!identity) return;
+
+  const backup = {
+    v: 1,
+    did: identity.did,
+    secretB64url: identity.secretB64url,
+    createdAt: identity.createdAt,
+  };
+
+  const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], { type: 'application/json' });
+  const filename = `technocore-identity-${identity.createdAt.slice(0, 10)}.json`;
+  downloadBlob(blob, filename);
+
+  identityMessage = 'Backup downloaded. This file is your only backup; keep it safe.';
+  render();
+}
+
+function handleSaveIdentity() {
+  if (!identity) return;
+
+  const payload = {
+    v: 1,
+    did: identity.did,
+    secretB64url: identity.secretB64url,
+    createdAt: identity.createdAt,
+  };
+
+  try {
+    localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(payload));
+    identityMessage = 'Saved on this device.';
+  } catch (error) {
+    identityMessage = getErrorText(error);
+  }
+
+  render();
+}
+
+function handleClearIdentity() {
+  identity = null;
+  identityFingerprint = '';
+  identityNotePath = '';
+  importText = '';
+
+  try {
+    localStorage.removeItem(IDENTITY_STORAGE_KEY);
+    identityMessage = 'Identity cleared from memory and this device.';
+  } catch (error) {
+    identityMessage = getErrorText(error);
+  }
+
+  render();
+}
+
+async function hydrateIdentityFields() {
+  if (!identity?.did) {
+    identityFingerprint = '';
+    identityNotePath = '';
+    return;
+  }
+
+  identityFingerprint = await fingerprint(identity.did);
+  identityNotePath = await notePath(identity.did);
+}
+
+function parseIdentityJson(input) {
+  const parsed = JSON.parse(input);
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid identity JSON object.');
+  }
+
+  if (parsed.v !== 1) {
+    throw new Error('Unsupported identity backup version.');
+  }
+
+  if (typeof parsed.did !== 'string' || !parsed.did.startsWith('did:key:')) {
+    throw new Error('Backup DID is missing or invalid.');
+  }
+
+  if (typeof parsed.secretB64url !== 'string' || parsed.secretB64url.length < 20) {
+    throw new Error('Backup secretB64url is missing or invalid.');
+  }
+
+  if (typeof parsed.createdAt !== 'string' || parsed.createdAt.length < 10) {
+    throw new Error('Backup createdAt is missing or invalid.');
+  }
+
+  return {
+    did: parsed.did,
+    secretB64url: parsed.secretB64url,
+    createdAt: parsed.createdAt,
+  };
+}
+
+function downloadBlob(blob, filename) {
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+function loadIdentityFromStorage() {
+  try {
+    const raw = localStorage.getItem(IDENTITY_STORAGE_KEY);
+    if (!raw) return null;
+    return parseIdentityJson(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function initializeIdentity() {
+  identity = loadIdentityFromStorage();
+  if (!identity) return;
+
+  try {
+    await hydrateIdentityFields();
+    identityMessage = 'Loaded saved identity from this device.';
+  } catch (error) {
+    identity = null;
+    identityMessage = getErrorText(error);
+  }
 }
 
 async function loadRoomMessages() {
@@ -290,7 +479,7 @@ function normalizeMessages(payload) {
 }
 
 function escapeHtml(value) {
-  return value
+  return String(value)
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
@@ -299,4 +488,7 @@ function escapeHtml(value) {
 }
 
 render();
-void loadRoomMessages();
+void initializeIdentity().finally(() => {
+  render();
+  void loadRoomMessages();
+});
