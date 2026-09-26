@@ -1,5 +1,5 @@
 import './styles.css';
-import { getErrorText, readRoom, sayUnsigned } from './lib/technocore.ts';
+import { getErrorText, readRoom, saySigned, sayUnsigned } from './lib/technocore.ts';
 import {
   encodeDidForUrl,
   fingerprint,
@@ -107,13 +107,16 @@ function render() {
           <label class="stacked" for="body">Message</label>
           <input id="body" type="text" placeholder="Type a message" value="${escapeHtml(roomText)}" autocomplete="off" />
 
-          <label class="checkbox" for="signed-send">
-            <input id="signed-send" type="checkbox" disabled /> Signed send
-          </label>
+          ${identity ? '<p class="hint">Signed send uses loaded DID identity.</p>' : '<p class="hint">Load an identity to enable signed send.</p>'}
 
-          <button type="button" id="send-unsigned" ${canSendUnsigned() ? '' : 'disabled'}>
-            ${roomLoading ? 'Sending…' : 'Send unsigned'}
-          </button>
+          <div class="action-row">
+            <button type="button" id="send-unsigned" ${canSendUnsigned() ? '' : 'disabled'}>
+              ${roomLoading ? 'Sending…' : 'Send unsigned'}
+            </button>
+            <button type="button" id="send-signed" ${canSendSigned() ? '' : 'disabled'}>
+              ${roomLoading ? 'Sending…' : 'Send signed'}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -147,12 +150,13 @@ function renderMessages() {
       const seq = valueOrBlank(msg.seq);
       const from = valueOrBlank(msg.from);
       const text = valueOrBlank(msg.text);
+      const did = valueOrBlank(msg.did);
       const verified = msg.verified === true;
-      const nickLabel = verified ? from : `~${from}`;
+      const authorLabel = did ? shortDidLabel(did) : verified ? from : `~${from}`;
 
       return `
         <article class="message">
-          <strong>${escapeHtml(String(seq))} · ${escapeHtml(nickLabel)}</strong>
+          <strong>${escapeHtml(String(seq))} · ${escapeHtml(authorLabel)}</strong>
           <p>${escapeHtml(String(text))}</p>
         </article>
       `;
@@ -169,16 +173,35 @@ function canSendUnsigned() {
   return !roomLoading && roomNick.trim().length > 0 && roomText.trim().length > 0;
 }
 
+function canSendSigned() {
+  return !roomLoading && Boolean(identity?.did && identity?.secretB64url) && roomText.trim().length > 0;
+}
+
 function statusLabel() {
   if (!identity?.did) return 'unsigned';
-  const did = identity.did;
-  if (did.length <= 22) return did;
-  return `${did.slice(0, 14)}…${did.slice(-6)}`;
+
+  const multibase = didToMultibase(identity.did);
+  if (multibase.startsWith('z6Mk')) {
+    return `z6Mk${multibase.slice(4, 12)}`;
+  }
+
+  return multibase.slice(0, 12);
 }
 
 function statusTitle() {
   if (!identity?.did) return 'Will show shortened DID when wired';
   return `DID: ${identity.did} | URL: ${encodeDidForUrl(identity.did)}`;
+}
+
+function didToMultibase(did) {
+  if (!did.startsWith('did:key:')) return did;
+  return did.slice('did:key:'.length);
+}
+
+function shortDidLabel(did) {
+  const multibase = didToMultibase(did);
+  if (multibase.length <= 8) return multibase;
+  return `${multibase.slice(0, 4)}…${multibase.slice(-4)}`;
 }
 
 function bindEvents() {
@@ -258,6 +281,10 @@ function bindEvents() {
 
   document.querySelector('#send-unsigned')?.addEventListener('click', () => {
     void sendUnsignedMessage();
+  });
+
+  document.querySelector('#send-signed')?.addEventListener('click', () => {
+    void sendSignedMessage();
   });
 }
 
@@ -462,6 +489,32 @@ async function sendUnsignedMessage() {
   }
 }
 
+async function sendSignedMessage() {
+  if (!canSendSigned()) return;
+
+  const targetRoom = roomName.trim() || 'lobby';
+  roomName = targetRoom;
+  roomLoading = true;
+  roomError = '';
+  render();
+
+  try {
+    const response = await saySigned({
+      room: targetRoom,
+      did: identity.did,
+      secret: identity.secretB64url,
+      text: roomText,
+    });
+    roomMessages = normalizeMessages(response);
+    roomText = '';
+  } catch (error) {
+    roomError = getErrorText(error);
+  } finally {
+    roomLoading = false;
+    render();
+  }
+}
+
 function normalizeMessages(payload) {
   const list =
     Array.isArray(payload)
@@ -475,6 +528,7 @@ function normalizeMessages(payload) {
   return list.map((item) => ({
     seq: item?.seq ?? item?.id ?? '',
     from: item?.from ?? item?.nick ?? 'unknown',
+    did: item?.did ?? (typeof item?.from === 'string' && item.from.startsWith('did:key:') ? item.from : ''),
     text: item?.text ?? item?.body ?? item?.msg ?? '',
     verified: item?.verified === true,
   }));

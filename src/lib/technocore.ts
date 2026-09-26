@@ -1,9 +1,27 @@
+import { encodeDidForUrl, signNote, signRoom, sweep } from './did.ts';
+
 const TECHNOCORE_BASE_URL = 'https://technocore.chat';
+const MAX_GET_URL_LENGTH = 1800;
 
 export type ReadRoomOptions = {
   since?: number | string;
   limit?: number;
   format: 'json';
+};
+
+type SaySignedInput = {
+  room: string;
+  did: string;
+  secret: string;
+  text: string;
+};
+
+type KvSetSignedInput = {
+  ns: string;
+  key: string;
+  did: string;
+  secret: string;
+  value: string;
 };
 
 class ApiError extends Error {
@@ -28,24 +46,24 @@ function encodeSegment(value: string | number): string {
 }
 
 export function sweepText(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return sweep(value);
 }
 
-async function fetchOrThrow(path: string): Promise<Response> {
+function buildUrl(path: string): string {
+  return `${TECHNOCORE_BASE_URL}${path}`;
+}
+
+async function fetchOrThrow(path: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(`${TECHNOCORE_BASE_URL}${path}`);
+    return await fetch(buildUrl(path), init);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Network request failed';
     throw new NetworkError(message);
   }
 }
 
-async function requestJson(path: string): Promise<unknown> {
-  const response = await fetchOrThrow(path);
+async function requestJson(path: string, init?: RequestInit): Promise<unknown> {
+  const response = await fetchOrThrow(path, init);
   if (!response.ok) {
     const body = await response.text();
     throw new ApiError(response.status, body);
@@ -53,13 +71,43 @@ async function requestJson(path: string): Promise<unknown> {
   return response.json();
 }
 
-async function requestText(path: string): Promise<string> {
-  const response = await fetchOrThrow(path);
+async function requestText(path: string, init?: RequestInit): Promise<string> {
+  const response = await fetchOrThrow(path, init);
   if (!response.ok) {
     const body = await response.text();
     throw new ApiError(response.status, body);
   }
   return response.text();
+}
+
+function normalizeRoomMessages(payload: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(payload)) return payload as Array<Record<string, unknown>>;
+
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>;
+    if (Array.isArray(record.messages)) return record.messages as Array<Record<string, unknown>>;
+    if (Array.isArray(record.items)) return record.items as Array<Record<string, unknown>>;
+  }
+
+  return [];
+}
+
+function roomMessageMatchesDid(message: Record<string, unknown>, did: string): boolean {
+  const didCandidate = typeof message.did === 'string' ? message.did : null;
+  const fromCandidate = typeof message.from === 'string' ? message.from : null;
+  const authorCandidate = typeof message.author === 'string' ? message.author : null;
+  return didCandidate === did || fromCandidate === did || authorCandidate === did;
+}
+
+async function readRoomWithConfirmation(room: string, did: string): Promise<unknown> {
+  const readResult = await readRoom(room, { limit: 50, format: 'json' });
+  const hasDidMessage = normalizeRoomMessages(readResult).some((message) => roomMessageMatchesDid(message, did));
+
+  if (!hasDidMessage) {
+    throw new Error('Signed write sent, but no message from the sender DID was found in room readback.');
+  }
+
+  return readResult;
 }
 
 export function getLlms(): Promise<unknown> {
@@ -100,12 +148,69 @@ export async function sayUnsigned(room: string, nick: string, text: string): Pro
   return readRoom(room, { limit: 50, format: 'json' });
 }
 
+export async function saySigned(input: SaySignedInput): Promise<unknown> {
+  const nonce = Date.now().toString();
+  const cleanedText = sweepText(input.text);
+  const sig = await signRoom({ secret: input.secret, room: input.room, nonce, text: cleanedText });
+
+  const getPath = `/r/${encodeSegment(input.room)}/say-signed/${encodeDidForUrl(input.did)}/${encodeSegment(sig)}/${encodeSegment(nonce)}/${encodeSegment(cleanedText)}`;
+  const getUrl = buildUrl(getPath);
+
+  try {
+    if (getUrl.length > MAX_GET_URL_LENGTH) {
+      await requestText(`/r/${encodeSegment(input.room)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ did: input.did, sig, nonce, text: cleanedText }),
+      });
+    } else {
+      await requestText(getPath);
+    }
+  } catch (error) {
+    if (error instanceof NetworkError) {
+      try {
+        return await readRoomWithConfirmation(input.room, input.did);
+      } catch {
+        throw error;
+      }
+    }
+    throw error;
+  }
+
+  return readRoomWithConfirmation(input.room, input.did);
+}
+
 export function kvGet(ns: string, key: string): Promise<unknown> {
   return requestJson(`/kv/${encodeSegment(ns)}/${encodeSegment(key)}`);
 }
 
 export function kvSet(ns: string, key: string, value: string): Promise<unknown> {
   return requestJson(`/kv/${encodeSegment(ns)}/${encodeSegment(key)}/${encodeSegment(sweepText(value))}`);
+}
+
+export async function kvSetSigned(input: KvSetSignedInput): Promise<unknown> {
+  const nonce = Date.now().toString();
+  const cleanedValue = sweepText(input.value);
+  const sig = await signNote({
+    secret: input.secret,
+    ns: input.ns,
+    key: input.key,
+    nonce,
+    value: cleanedValue,
+  });
+
+  const getPath = `/kv/${encodeSegment(input.ns)}/${encodeSegment(input.key)}/set-signed/${encodeDidForUrl(input.did)}/${encodeSegment(sig)}/${encodeSegment(nonce)}/${encodeSegment(cleanedValue)}`;
+  const getUrl = buildUrl(getPath);
+
+  if (getUrl.length > MAX_GET_URL_LENGTH) {
+    return requestJson(`/kv/${encodeSegment(input.ns)}/${encodeSegment(input.key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ did: input.did, sig, nonce, value: cleanedValue }),
+    });
+  }
+
+  return requestJson(getPath);
 }
 
 export function getEvents(): Promise<unknown> {
