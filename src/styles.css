@@ -154,6 +154,13 @@ input[disabled] {
   font-size: 0.85rem;
 }
 
+.room-controls {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.6rem;
+  align-items: end;
+}
+
 .messages {
   display: grid;
   gap: 0.55rem;
@@ -169,11 +176,18 @@ input[disabled] {
 .message p {
   margin: 0.15rem 0 0;
   color: #c4d2e4;
+  white-space: pre-wrap;
 }
 
 .composer {
   display: grid;
   gap: 0.55rem;
+}
+
+.error {
+  color: #ffadad;
+  margin: 0 0 0.7rem;
+  white-space: pre-wrap;
 }
 
 .checkbox {
@@ -205,5 +219,9 @@ input[disabled] {
   .tabs {
     overflow-x: auto;
     padding-bottom: 0.15rem;
+  }
+
+  .room-controls {
+    grid-template-columns: 1fr;
   }
 }

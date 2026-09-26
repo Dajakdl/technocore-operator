@@ -1,4 +1,5 @@
 import './styles.css';
+import { getErrorText, readRoom, sayUnsigned } from './lib/technocore.ts';
 
 const tabs = [
   { id: 'identity', label: 'Identity' },
@@ -6,14 +7,16 @@ const tabs = [
   { id: 'registry', label: 'Registry' },
 ];
 
-const sampleMessages = [
-  { nick: 'relay', body: 'UI preview only. Messaging API is not connected.' },
-  { nick: 'operator', body: 'Use this console layout to validate interaction flows.' },
-];
-
 let activeTab = 'identity';
 let importText = '';
 let importMessage = '';
+
+let roomName = 'lobby';
+let roomNick = '';
+let roomText = '';
+let roomMessages = [];
+let roomLoading = false;
+let roomError = '';
 
 const app = document.querySelector('#app');
 
@@ -71,34 +74,34 @@ function render() {
 
       <section id="panel-rooms" class="panel" role="tabpanel" aria-labelledby="tab-rooms" ${activeTab !== 'rooms' ? 'hidden' : ''}>
         <h2>Rooms</h2>
-        <label class="stacked" for="room-name">Room name</label>
-        <input id="room-name" type="text" value="lobby" autocomplete="off" />
+        <div class="room-controls">
+          <div>
+            <label class="stacked" for="room-name">Room name</label>
+            <input id="room-name" type="text" value="${escapeHtml(roomName)}" autocomplete="off" />
+          </div>
+          <button type="button" id="refresh-room" ${roomLoading ? 'disabled' : ''}>Refresh</button>
+        </div>
 
         <div class="messages" role="log" aria-label="Message list">
-          ${sampleMessages
-            .map(
-              (msg) => `
-                <article class="message">
-                  <strong>${escapeHtml(msg.nick)}</strong>
-                  <p>${escapeHtml(msg.body)}</p>
-                </article>
-              `,
-            )
-            .join('')}
+          ${renderMessages()}
         </div>
+
+        ${roomError ? `<p class="error" aria-live="polite">${escapeHtml(roomError)}</p>` : ''}
 
         <div class="composer">
           <label class="stacked" for="nick">Nickname</label>
-          <input id="nick" type="text" placeholder="operator" autocomplete="off" />
+          <input id="nick" type="text" placeholder="operator" value="${escapeHtml(roomNick)}" autocomplete="off" />
 
           <label class="stacked" for="body">Message</label>
-          <input id="body" type="text" placeholder="Type a message" autocomplete="off" />
+          <input id="body" type="text" placeholder="Type a message" value="${escapeHtml(roomText)}" autocomplete="off" />
 
           <label class="checkbox" for="signed-send">
             <input id="signed-send" type="checkbox" disabled /> Signed send
           </label>
 
-          <button type="button" disabled>Send unsigned</button>
+          <button type="button" id="send-unsigned" ${canSendUnsigned() ? '' : 'disabled'}>
+            ${roomLoading ? 'Sending…' : 'Send unsigned'}
+          </button>
         </div>
       </section>
 
@@ -116,6 +119,42 @@ function render() {
   `;
 
   bindEvents();
+}
+
+function renderMessages() {
+  if (roomLoading && roomMessages.length === 0) {
+    return '<p class="muted">Loading…</p>';
+  }
+
+  if (roomMessages.length === 0) {
+    return '<p class="muted">No messages yet.</p>';
+  }
+
+  return roomMessages
+    .map((msg) => {
+      const seq = valueOrBlank(msg.seq);
+      const from = valueOrBlank(msg.from);
+      const text = valueOrBlank(msg.text);
+      const verified = msg.verified === true;
+      const nickLabel = verified ? from : `~${from}`;
+
+      return `
+        <article class="message">
+          <strong>${escapeHtml(String(seq))} · ${escapeHtml(nickLabel)}</strong>
+          <p>${escapeHtml(String(text))}</p>
+        </article>
+      `;
+    })
+    .join('');
+}
+
+function valueOrBlank(value) {
+  if (value === null || value === undefined || value === '') return '';
+  return String(value);
+}
+
+function canSendUnsigned() {
+  return !roomLoading && roomNick.trim().length > 0 && roomText.trim().length > 0;
 }
 
 function bindEvents() {
@@ -164,6 +203,90 @@ function bindEvents() {
     render();
     document.querySelector('#import-area')?.focus();
   });
+
+  const roomNameInput = document.querySelector('#room-name');
+  roomNameInput?.addEventListener('input', (event) => {
+    roomName = event.target.value;
+  });
+
+  document.querySelector('#refresh-room')?.addEventListener('click', () => {
+    void loadRoomMessages();
+  });
+
+  const nickInput = document.querySelector('#nick');
+  nickInput?.addEventListener('input', (event) => {
+    roomNick = event.target.value;
+    render();
+    document.querySelector('#nick')?.focus();
+  });
+
+  const bodyInput = document.querySelector('#body');
+  bodyInput?.addEventListener('input', (event) => {
+    roomText = event.target.value;
+    render();
+    document.querySelector('#body')?.focus();
+  });
+
+  document.querySelector('#send-unsigned')?.addEventListener('click', () => {
+    void sendUnsignedMessage();
+  });
+}
+
+async function loadRoomMessages() {
+  const targetRoom = roomName.trim() || 'lobby';
+  roomName = targetRoom;
+  roomLoading = true;
+  roomError = '';
+  render();
+
+  try {
+    const response = await readRoom(targetRoom, { limit: 50, format: 'json' });
+    roomMessages = normalizeMessages(response);
+  } catch (error) {
+    roomError = getErrorText(error);
+  } finally {
+    roomLoading = false;
+    render();
+  }
+}
+
+async function sendUnsignedMessage() {
+  if (!canSendUnsigned()) return;
+
+  const targetRoom = roomName.trim() || 'lobby';
+  roomName = targetRoom;
+  roomLoading = true;
+  roomError = '';
+  render();
+
+  try {
+    const response = await sayUnsigned(targetRoom, roomNick.trim(), roomText);
+    roomMessages = normalizeMessages(response);
+    roomText = '';
+  } catch (error) {
+    roomError = getErrorText(error);
+  } finally {
+    roomLoading = false;
+    render();
+  }
+}
+
+function normalizeMessages(payload) {
+  const list =
+    Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.messages)
+        ? payload.messages
+        : Array.isArray(payload?.items)
+          ? payload.items
+          : [];
+
+  return list.map((item) => ({
+    seq: item?.seq ?? item?.id ?? '',
+    from: item?.from ?? item?.nick ?? 'unknown',
+    text: item?.text ?? item?.body ?? item?.msg ?? '',
+    verified: item?.verified === true,
+  }));
 }
 
 function escapeHtml(value) {
@@ -176,3 +299,4 @@ function escapeHtml(value) {
 }
 
 render();
+void loadRoomMessages();
